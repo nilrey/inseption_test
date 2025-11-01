@@ -6,7 +6,6 @@ import cv2
 import numpy as np
 from collections import defaultdict
 import os
-from utils.tracking_utils import ImprovedTracker
 
 class VideoObjectDetector:
     def __init__(self):
@@ -28,8 +27,10 @@ class VideoObjectDetector:
             'vehicle': (255, 0, 0)      # Синий
         }
         
-        # Инициализация улучшенного трекера
-        self.tracker = ImprovedTracker(max_age=10, min_hits=3, iou_threshold=0.3)
+        # Треккинг объектов
+        self.track_history = defaultdict(lambda: [])
+        self.next_object_id = 0
+        self.tracked_objects = {}
         
     def sliding_window_detection(self, frame, window_size=(299, 299), step_size=100):
         """Детекция объектов с помощью скользящего окна"""
@@ -84,18 +85,71 @@ class VideoObjectDetector:
         
         return None
     
-    def draw_detections_improved(self, frame, tracked_objects):
-        """Отрисовка bounding boxes для улучшенного трекера"""
-        for tracker in tracked_objects:
-            obj_id = tracker['id']
-            category = tracker['category']
-            bbox = tracker['bbox']
-            confidence = tracker['confidence']
-            positions = tracker['positions']
+    def track_objects(self, detections, max_distance=50):
+        """Треккинг объектов между кадрами"""
+        current_frame_objects = {}
+        
+        for detection in detections:
+            center = detection['center']
+            category = detection['category']
+            confidence = detection['confidence']
             
-            # Пропускаем объекты с малым количеством подтверждений
-            if tracker['hits'] < self.tracker.min_hits:
-                continue
+            # Поиск ближайшего существующего объекта
+            best_match_id = None
+            min_distance = float('inf')
+            
+            for obj_id, obj_data in self.tracked_objects.items():
+                if obj_data['category'] != category:
+                    continue
+                    
+                # Вычисляем расстояние до последней позиции объекта
+                last_center = obj_data['positions'][-1]
+                distance = np.sqrt((center[0] - last_center[0])**2 + 
+                                 (center[1] - last_center[1])**2)
+                
+                if distance < min_distance and distance < max_distance:
+                    min_distance = distance
+                    best_match_id = obj_id
+            
+            if best_match_id is not None:
+                # Обновляем существующий объект
+                obj_id = best_match_id
+                self.tracked_objects[obj_id]['positions'].append(center)
+                self.tracked_objects[obj_id]['bbox'] = detection['bbox']
+                self.tracked_objects[obj_id]['confidence'] = confidence
+                self.tracked_objects[obj_id]['active_frames'] += 1
+            else:
+                # Создаем новый объект
+                obj_id = self.next_object_id
+                self.next_object_id += 1
+                self.tracked_objects[obj_id] = {
+                    'category': category,
+                    'positions': [center],
+                    'bbox': detection['bbox'],
+                    'confidence': confidence,
+                    'active_frames': 1
+                }
+            
+            current_frame_objects[obj_id] = self.tracked_objects[obj_id]
+        
+        # Удаляем объекты, которые не обновлялись
+        inactive_objects = []
+        for obj_id in self.tracked_objects:
+            if obj_id not in current_frame_objects:
+                inactive_objects.append(obj_id)
+        
+        for obj_id in inactive_objects:
+            del self.tracked_objects[obj_id]
+        
+        return current_frame_objects
+    
+    def draw_detections(self, frame, tracked_objects):
+        """Отрисовка bounding boxes и информации о треккинге"""
+        for obj_id, obj_data in tracked_objects.items():
+            category = obj_data['category']
+            bbox = obj_data['bbox']
+            confidence = obj_data['confidence']
+            positions = obj_data['positions']
             
             # Цвет для категории
             color = self.colors.get(category, (255, 255, 255))
@@ -107,8 +161,6 @@ class VideoObjectDetector:
             # Рисуем метку с ID и уверенностью
             label = f"{category} ID:{obj_id} ({confidence:.2f})"
             label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
-            
-            # Фон для текста
             cv2.rectangle(frame, (x1, y1 - label_size[1] - 10), 
                          (x1 + label_size[0], y1), color, -1)
             cv2.putText(frame, label, (x1, y1 - 5), 
@@ -118,17 +170,11 @@ class VideoObjectDetector:
             for i in range(1, len(positions)):
                 if positions[i - 1] is None or positions[i] is None:
                     continue
-                # Толщина линии уменьшается для старых точек
                 thickness = int(np.sqrt(64 / float(i + 1)) * 2)
                 cv2.line(frame, positions[i - 1], positions[i], color, thickness)
-            
-            # Рисуем текущую позицию (точку)
-            if positions:
-                current_pos = positions[-1]
-                cv2.circle(frame, current_pos, 5, color, -1)
     
     def process_video(self, input_video_path, output_video_path):
-        """Основной метод обработки видео с улучшенным треккингом"""
+        """Основной метод обработки видео"""
         # Открываем входное видео
         cap = cv2.VideoCapture(input_video_path)
         
@@ -151,7 +197,7 @@ class VideoObjectDetector:
         frame_count = 0
         processed_frames = 0
         
-        print("Начало обработки видео с улучшенным треккингом...")
+        print("Начало обработки видео...")
         
         while True:
             ret, frame = cap.read()
@@ -162,55 +208,39 @@ class VideoObjectDetector:
             frame_count += 1
             
             # Обрабатываем каждый N-й кадр для увеличения производительности
-            if frame_count % 3 == 0:  # Обрабатываем каждый 3-й кадр
-                # Детекция объектов с помощью скользящего окна
-                detections = self.sliding_window_detection(frame)
-                
-                # Улучшенный треккинг с ImprovedTracker
-                tracked_objects = self.tracker.update(detections)
-                
-                # Отрисовка результатов с улучшенным треккингом
-                self.draw_detections_improved(frame, tracked_objects)
-                
-                processed_frames += 1
-            else:
-                # Для непроцессорных кадров используем предсказания трекера
-                tracked_objects = self.tracker.predict_current()
-                self.draw_detections_improved(frame, tracked_objects)
+            #if frame_count % 3 == 0:  # Обрабатываем каждый 3-й кадр
+            # Детекция объектов
+            detections = self.sliding_window_detection(frame)
+            
+            # Треккинг объектов
+            tracked_objects = self.track_objects(detections)
+            
+            # Отрисовка результатов
+            self.draw_detections(frame, tracked_objects)
+            
+            processed_frames += 1
             
             # Добавляем информацию о кадре
             cv2.putText(frame, f"Frame: {frame_count}/{total_frames}", 
                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            cv2.putText(frame, f"Tracked Objects: {len(tracked_objects)}", 
+            cv2.putText(frame, f"Objects: {len(tracked_objects)}", 
                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            cv2.putText(frame, f"Tracker: ImprovedTracker", 
-                       (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            
-            # Статистика трекера
-            stats = self.tracker.get_tracker_stats()
-            cv2.putText(frame, f"Total Tracks: {stats['max_tracks']}", 
-                       (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             
             # Записываем кадр в выходное видео
             out.write(frame)
             
             # Показываем прогресс
-            if frame_count % 10 == 0:
+            if frame_count % 30 == 0:
                 print(f"Обработано кадров: {frame_count}/{total_frames} "
                       f"({frame_count/total_frames*100:.1f}%)")
-                print(f"Активных треков: {len(tracked_objects)}")
         
         # Освобождаем ресурсы
         cap.release()
         out.release()
         cv2.destroyAllWindows()
         
-        # Финальная статистика
-        stats = self.tracker.get_tracker_stats()
-        print(f"\nОбработка завершена!")
-        print(f"Всего кадров: {frame_count}, обработано детекций: {processed_frames}")
-        print(f"Максимальное количество треков: {stats['max_tracks']}")
-        print(f"Всего создано треков: {stats['next_id']}")
+        print(f"Обработка завершена!")
+        print(f"Всего кадров: {frame_count}, обработано: {processed_frames}")
         print(f"Выходной файл: {output_video_path}")
 
 def main():
@@ -219,7 +249,7 @@ def main():
     
     # Пути к файлам
     input_video = "data/input/input_video.mp4"
-    output_video = "data/output/output-inet-002.mp4"
+    output_video = "data/output/output_video_with_tracking.mp4"
     
     # Проверка существования входного файла
     if not os.path.exists(input_video):

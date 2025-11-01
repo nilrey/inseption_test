@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 from collections import defaultdict
 import os
-from tracking_utils import ImprovedTracker
+from utils.tracking_utils import ImprovedTracker
 
 class VideoObjectDetector:
     def __init__(self):
@@ -262,8 +262,8 @@ def main():
     detector = VideoObjectDetector()
     
     # Пути к файлам
-    input_video = "input_video.mp4"
-    output_video = "output-inet-001.mp4"
+    input_video = "data/input/input_video.mp4"
+    output_video = "data/output/output-inet-001.mp4"
     
     # Проверка существования входного файла
     if not os.path.exists(input_video):
